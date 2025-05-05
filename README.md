@@ -103,12 +103,13 @@ plugins:
 progress:
   type: file
 source:
-  type: mysql
+  type: postgres
   host: 192.168.123.205
   port: 3306
   user: root
   password: "123456"
   database: beauty
+  slot: test_beauty
 meilisearch:
   api_url: http://192.168.123.205:7700
   api_key:

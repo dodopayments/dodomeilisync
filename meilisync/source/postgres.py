@@ -33,7 +33,7 @@ class CustomDictCursor(psycopg2.extras.RealDictCursor):
 
 class Postgres(Source):
     type = SourceType.postgres
-    slot = "meilisync"
+    default_slot = "meilisync"
 
     def __init__(
         self,
@@ -41,6 +41,10 @@ class Postgres(Source):
         tables: List[str],
         **kwargs,
     ):
+        # Extract the slot parameter before initializing the parent class
+        # So it doesn't get passed to psycopg2.connect()
+        self.slot = kwargs.pop("slot", self.default_slot)
+
         super().__init__(progress, tables, **kwargs)
         self.conn = psycopg2.connect(**self.kwargs, connection_factory=LogicalReplicationConnection)
         self.cursor = self.conn.cursor()
