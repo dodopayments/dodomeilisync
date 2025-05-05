@@ -138,6 +138,8 @@ sentry:
   environment: "production"
 ```
 
+You can also convert the YAML config to JSON and set it to an environment variable `MEILISYNC_CONFIG_STR`.
+
 ### debug (optional)
 
 Enable debug mode, default is `false`, if you want to see more logs, you can set it to `true`.

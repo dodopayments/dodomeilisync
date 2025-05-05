@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 from typing import List, Optional
 
 import typer
@@ -29,9 +31,24 @@ def callback(
         if context.invoked_subcommand == "version":
             return
         context.ensure_object(dict)
-        with open(config_file) as f:
-            config = f.read()
-        settings = Settings.model_validate(yaml.safe_load(config))
+
+        # Check for environment variable config string first (in JSON format)
+        config_str = os.environ.get("MEILISYNC_CONFIG_STR")
+        if config_str:
+            logger.info("Using configuration from MEILISYNC_CONFIG_STR environment variable (JSON)")
+            try:
+                config_data = json.loads(config_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON configuration from environment variable: {e}")
+                raise typer.Exit(1)
+        else:
+            # Fall back to config file if environment variable not set
+            logger.info(f"Using configuration from file: {config_file}")
+            with open(config_file) as f:
+                # File is still expected to be YAML
+                config_data = yaml.safe_load(f.read())
+
+        settings = Settings.model_validate(config_data)
         if settings.debug:
             logger.debug(settings)
         if settings.sentry:
