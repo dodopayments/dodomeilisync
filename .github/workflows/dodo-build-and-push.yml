@@ -32,4 +32,4 @@ jobs:
           gcloud auth configure-docker ${{ vars.REGION }}-docker.pkg.dev
 
       - name: Push dodo-meilisync image to GAR
-      - run: docker push ${{ vars.MEILISYNC_GAR_LOCATION}}:latest
+        run: docker push ${{ vars.MEILISYNC_GAR_LOCATION}}:latest
