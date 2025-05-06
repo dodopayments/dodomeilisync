@@ -1,13 +1,13 @@
 import asyncio
 import json
-from asyncio import Queue
-from typing import List
+from typing import List, Any
 
 import psycopg2
 import psycopg2.errors
 from psycopg2._psycopg import ReplicationMessage
 from psycopg2.extras import LogicalReplicationConnection
 
+from loguru import logger
 from meilisync.enums import EventType, SourceType
 from meilisync.schemas import Event, ProgressEvent
 from meilisync.settings import Sync
@@ -49,6 +49,7 @@ class Postgres(Source):
         self.conn = psycopg2.connect(**self.kwargs, connection_factory=LogicalReplicationConnection)
         self.cursor = self.conn.cursor()
         self.queue = None
+        self._loop = None
         if self.progress:
             self.start_lsn = self.progress["start_lsn"]
         else:
@@ -92,47 +93,55 @@ class Postgres(Source):
 
     def _consumer(self, msg: ReplicationMessage):
         payload = json.loads(msg.payload)
-        changes = payload.get("change")
-        if not changes:
-            return
+        next_lsn = payload["nextlsn"]
+
+        changes = payload.get("change", [])
         for change in changes:
-            kind = change.get("kind")
-            table = change.get("table")
-            if table not in self.tables:
-                return
-            columnnames = change.get("columnnames", [])
-            columnvalues = change.get("columnvalues", [])
-            columntypes = change.get("columntypes", [])
+            self.__handle_change(change, next_lsn)
 
-            for i in range(len(columntypes)):
-                if columntypes[i] == "json":
-                    columnvalues[i] = json.loads(columnvalues[i])
+        # Always report success to the server to avoid a “disk full” condition.
+        # https://www.psycopg.org/docs/extras.html#psycopg2.extras.ReplicationCursor.consume_stream
+        msg.cursor.send_feedback(flush_lsn=msg.data_start)
 
-            if kind == "update":
-                values = dict(zip(columnnames, columnvalues))
-                event_type = EventType.update
-            elif kind == "delete":
-                values = (
-                    dict(zip(columnnames, columnvalues))
-                    if columnvalues
-                    else {change["oldkeys"]["keynames"][0]: change["oldkeys"]["keyvalues"][0]}
-                )
-                event_type = EventType.delete
-            elif kind == "insert":
-                values = dict(zip(columnnames, columnvalues))
-                event_type = EventType.create
-            else:
-                return
-            asyncio.new_event_loop().run_until_complete(
-                self.queue.put(  # type: ignore
-                    Event(
-                        type=event_type,
-                        table=table,
-                        data=values,
-                        progress={"start_lsn": payload.get("nextlsn")},
-                    )
-                )
+    def __handle_change(self, change: dict[str, Any], next_lsn: str):
+        table = change.get("table")
+        if table not in self.tables:
+            return
+
+        columnnames = change.get("columnnames", [])
+        columnvalues = change.get("columnvalues", [])
+        columntypes = change.get("columntypes", [])
+
+        for i in range(len(columntypes)):
+            if columntypes[i] == "json":
+                columnvalues[i] = json.loads(columnvalues[i])
+
+        kind = change.get("kind")
+        if kind == "update":
+            values = dict(zip(columnnames, columnvalues))
+            event_type = EventType.update
+        elif kind == "delete":
+            values = (
+                dict(zip(columnnames, columnvalues))
+                if columnvalues
+                else {change["oldkeys"]["keynames"][0]: change["oldkeys"]["keyvalues"][0]}
             )
+            event_type = EventType.delete
+        elif kind == "insert":
+            values = dict(zip(columnnames, columnvalues))
+            event_type = EventType.create
+        else:
+            return
+
+        logger.debug(f'Creating event {event_type=} {values=}')
+        event =  Event(
+            type=event_type,
+            table=table,
+            data=values,
+            progress={"start_lsn": next_lsn},
+        )
+        # schedule the task on the main event loop
+        self._loop.call_soon_threadsafe(self.queue.put_nowait, event)
 
     async def get_count(self, sync: Sync):
         with self.conn_dict.cursor() as cur:
@@ -141,7 +150,8 @@ class Postgres(Source):
             return ret[0]
 
     async def __aiter__(self):
-        self.queue = Queue()
+        self.queue = asyncio.Queue()
+        self._loop = asyncio.get_running_loop()  # Store the running loop
         try:
             self.cursor.create_replication_slot(self.slot, output_plugin="wal2json")
         except psycopg2.errors.DuplicateObject:  # type: ignore
@@ -164,7 +174,9 @@ class Postgres(Source):
             progress={"start_lsn": self.start_lsn},
         )
         while True:
-            yield await self.queue.get()
+            item = await self.queue.get()
+            logger.debug(f'Got item from queue {item=}')
+            yield item
 
     def _ping(self):
         with self.conn_dict.cursor() as cur:
